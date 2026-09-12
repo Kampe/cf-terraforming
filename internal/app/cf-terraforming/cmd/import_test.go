@@ -231,3 +231,80 @@ func TestResourceImportV5(t *testing.T) {
 		})
 	}
 }
+
+// TestIdentifierFromResponse covers API responses whose identifier is not named
+// "id". Before these overrides existed such entries fell through to the account
+// or zone ID, so every object of the type produced the same import id and the
+// same resource name -- a set of import blocks that is individually plausible and
+// collectively wrong.
+func TestIdentifierFromResponse(t *testing.T) {
+	for name, tc := range map[string]struct {
+		resourceType string
+		data         map[string]interface{}
+		want         string
+	}{
+		"r2 bucket uses name": {
+			"cloudflare_r2_bucket",
+			map[string]interface{}{"name": "carnival-storage"},
+			"carnival-storage",
+		},
+		"device profile uses policy_id": {
+			"cloudflare_zero_trust_device_custom_profile",
+			map[string]interface{}{"policy_id": "d7d8f9", "name": "figge Barracuda"},
+			"d7d8f9",
+		},
+		"web analytics site uses site_tag": {
+			"cloudflare_web_analytics_site",
+			map[string]interface{}{"site_tag": "abc123"},
+			"abc123",
+		},
+		"dex test uses test_id": {
+			"cloudflare_zero_trust_dex_test",
+			map[string]interface{}{"test_id": "t-1"},
+			"t-1",
+		},
+		"no override for the type": {
+			"cloudflare_healthcheck",
+			map[string]interface{}{"name": "should-not-be-used"},
+			"",
+		},
+		"override field absent": {
+			"cloudflare_r2_bucket",
+			map[string]interface{}{"creation_date": "2024-01-01"},
+			"",
+		},
+		"override field is nil": {
+			"cloudflare_r2_bucket",
+			map[string]interface{}{"name": nil},
+			"",
+		},
+		"override field is not a string": {
+			"cloudflare_r2_bucket",
+			map[string]interface{}{"name": 42},
+			"",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := identifierFromResponse(tc.resourceType, tc.data); got != tc.want {
+				t.Fatalf("identifierFromResponse(%q) = %q, want %q", tc.resourceType, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResourceIDFieldOverridesHaveImportFormats guards against an override being
+// added for a type that has no import format, which would make the override
+// unreachable.
+func TestResourceIDFieldOverridesHaveImportFormats(t *testing.T) {
+	for resourceType := range resourceIDFieldOverrides {
+		format, ok := resourceImportStringFormats[resourceType]
+		if !ok {
+			t.Errorf("%s has an id-field override but no import format", resourceType)
+			continue
+		}
+		if !strings.Contains(format, ":id") {
+			t.Errorf("%s has an id-field override but its import format %q does not use :id, "+
+				"so the override can never be needed", resourceType, format)
+		}
+	}
+}

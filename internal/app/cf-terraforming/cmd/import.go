@@ -22,6 +22,49 @@ import (
 
 // resourceImportStringFormats contains a mapping of the resource type to the
 // composite ID that is compatible with performing an import.
+// resourceIDFieldOverrides names the field holding a resource's own identifier
+// for API responses that do not use "id".
+//
+// Without these, the entries fall through to the account or zone ID (see the
+// fallback in the import loop), which gives every object of the type the same
+// import id and the same generated resource name. The result passes a parity
+// check -- one import block per resource -- while pointing all of them at one
+// object.
+var resourceIDFieldOverrides = map[string]string{
+	"cloudflare_r2_bucket":                        "name",
+	"cloudflare_web_analytics_site":               "site_tag",
+	"cloudflare_zero_trust_device_custom_profile": "policy_id",
+	"cloudflare_zero_trust_dex_test":              "test_id",
+}
+
+// identifierFromResponse returns the resource's own identifier from an API
+// response object whose identifier is not named "id", or "" when there is none.
+// Shared by generate and import so a resource's name and its import id are
+// always derived the same way.
+func identifierFromResponse(resourceType string, data map[string]interface{}) string {
+	field, ok := resourceIDFieldOverrides[resourceType]
+	if !ok {
+		return ""
+	}
+	v, present := data[field]
+	if !present || v == nil {
+		return ""
+	}
+	str, isStr := v.(string)
+	if !isStr {
+		return ""
+	}
+	return str
+}
+
+// idFieldHint describes which alternative field was tried, for the error message.
+func idFieldHint(resourceType string) string {
+	if field, ok := resourceIDFieldOverrides[resourceType]; ok {
+		return fmt.Sprintf(" and %q", field)
+	}
+	return ""
+}
+
 var resourceImportStringFormats = map[string]string{
 	"cloudflare_access_application":                            ":account_id/:id",
 	"cloudflare_access_group":                                  ":account_id/:id",
@@ -729,12 +772,39 @@ func runImport() func(cmd *cobra.Command, args []string) {
 			var id string
 
 			if data.(map[string]interface{})["id"] == nil {
-				if accountID != "" {
-					id = accountID
-				}
+				// Not every API object names its identifier "id". Where the
+				// resource's identifier lives under a different key, use it.
+				id = identifierFromResponse(resourceType, data.(map[string]interface{}))
 
-				if zoneID != "" {
-					id = zoneID
+				if id == "" {
+					// Falling back to the account or zone ID is only correct when
+					// that IS the resource's import id -- a per-account or
+					// per-zone singleton such as cloudflare_account or
+					// cloudflare_email_routing_dns. When the import format
+					// contains :id, the scope id is definitionally the wrong
+					// value, and emitting it produces an import block that is
+					// individually plausible and collectively wrong: every object
+					// of the type gets the same id, and because the resource name
+					// is derived from the same value, they collide too.
+					//
+					// Skip rather than emit a known-bad id. A missing import block
+					// is visible; a wrong one silently adopts the wrong object.
+					if format, known := resourceImportStringFormats[resourceType]; known && strings.Contains(format, ":id") {
+						log.Errorf("%s: no identifier found in the API response for entry %d "+
+							"(looked for \"id\"%s). Import format is %q, which requires one, so "+
+							"skipping this resource rather than emitting the account or zone ID in "+
+							"its place. Please report this resource type as a bug.",
+							resourceType, i, idFieldHint(resourceType), format)
+						continue
+					}
+
+					if accountID != "" {
+						id = accountID
+					}
+
+					if zoneID != "" {
+						id = zoneID
+					}
 				}
 			} else {
 				switch data.(map[string]interface{})["id"].(type) {

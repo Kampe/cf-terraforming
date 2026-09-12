@@ -1516,12 +1516,21 @@ func generateResources() func(cmd *cobra.Command, args []string) {
 						id = fmt.Sprintf("%f", structData["id"].(float64))
 					default:
 						if structData["id"] == nil {
-							if accountID != "" {
-								id = accountID
-							}
+							// Some API objects name their identifier something
+							// other than "id". Use it, so the generated resource
+							// name matches the one `import` derives -- otherwise
+							// every object of the type is named after the account
+							// or zone and they collide.
+							id = identifierFromResponse(resourceType, structData)
 
-							if zoneID != "" {
-								id = zoneID
+							if id == "" {
+								if accountID != "" {
+									id = accountID
+								}
+
+								if zoneID != "" {
+									id = zoneID
+								}
 							}
 						} else {
 							id = structData["id"].(string)
