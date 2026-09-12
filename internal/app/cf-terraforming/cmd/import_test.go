@@ -308,3 +308,23 @@ func TestResourceIDFieldOverridesHaveImportFormats(t *testing.T) {
 		}
 	}
 }
+
+// TestHCLSafeIdentifier covers identifiers taken from fields that are not
+// restricted to HCL identifier syntax. An R2 bucket name may contain a dot; a
+// resource name is not a quoted string, so an unsanitised value produces a file
+// that will not parse.
+func TestHCLSafeIdentifier(t *testing.T) {
+	for in, want := range map[string]string{
+		"carnival-storage":   "carnival-storage",
+		"my.bucket.name":     "my_bucket_name",
+		"with space":         "with_space",
+		"weird/slash":        "weird_slash",
+		"unicode-ü":          "unicode-_",
+		"d7d8f9":             "d7d8f9",
+		"already_underscore": "already_underscore",
+	} {
+		if got := hclSafeIdentifier(in); got != want {
+			t.Errorf("hclSafeIdentifier(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

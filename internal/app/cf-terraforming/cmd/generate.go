@@ -1524,6 +1524,23 @@ func generateResources() func(cmd *cobra.Command, args []string) {
 							id = identifierFromResponse(resourceType, structData)
 
 							if id == "" {
+								// Falling back to the account or zone ID is only
+								// correct when that IS the resource's import id.
+								// When the import format needs :id, `import` skips
+								// the entry -- so emitting a resource block here
+								// would leave a resource with no import block, and
+								// the first apply would CREATE a duplicate instead
+								// of adopting the existing object. generate and
+								// import must agree on which entries they handle.
+								if format, known := resourceImportStringFormats[resourceType]; known && strings.Contains(format, ":id") {
+									log.Errorf("%s: no identifier found in the API response for entry %d "+
+										"(looked for \"id\"%s). Import format is %q, which requires one, so "+
+										"skipping this resource -- emitting it without a matching import "+
+										"block would make the first apply create a duplicate.",
+										resourceType, i, idFieldHint(resourceType), format)
+									continue
+								}
+
 								if accountID != "" {
 									id = accountID
 								}
@@ -1536,7 +1553,7 @@ func generateResources() func(cmd *cobra.Command, args []string) {
 							id = structData["id"].(string)
 						}
 					}
-					resourceID = fmt.Sprintf("terraform_managed_resource_%s_%d", id, i)
+					resourceID = fmt.Sprintf("terraform_managed_resource_%s_%d", hclSafeIdentifier(id), i)
 				}
 				resource := rootBody.AppendNewBlock("resource", []string{resourceType, resourceID}).Body()
 

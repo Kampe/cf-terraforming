@@ -57,6 +57,25 @@ func identifierFromResponse(resourceType string, data map[string]interface{}) st
 	return str
 }
 
+// hclSafeIdentifier makes a value safe to embed in a Terraform resource name.
+// Identifiers taken from fields such as an R2 bucket name are not restricted to
+// the characters HCL allows in an identifier -- a bucket may contain a dot, for
+// example -- and a resource name is not a quoted string, so an unsanitised value
+// produces a file that will not parse. Previously this position only ever held a
+// hex or UUID id, so the problem was unreachable.
+func hclSafeIdentifier(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
+}
+
 // idFieldHint describes which alternative field was tried, for the error message.
 func idFieldHint(resourceType string) string {
 	if field, ok := resourceIDFieldOverrides[resourceType]; ok {
@@ -768,6 +787,7 @@ func runImport() func(cmd *cobra.Command, args []string) {
 
 		importFile := hclwrite.NewEmptyFile()
 		importBody := importFile.Body()
+		skippedForMissingID := 0
 		for i, data := range jsonStructData {
 			var id string
 
@@ -790,6 +810,7 @@ func runImport() func(cmd *cobra.Command, args []string) {
 					// Skip rather than emit a known-bad id. A missing import block
 					// is visible; a wrong one silently adopts the wrong object.
 					if format, known := resourceImportStringFormats[resourceType]; known && strings.Contains(format, ":id") {
+						skippedForMissingID++
 						log.Errorf("%s: no identifier found in the API response for entry %d "+
 							"(looked for \"id\"%s). Import format is %q, which requires one, so "+
 							"skipping this resource rather than emitting the account or zone ID in "+
@@ -817,12 +838,22 @@ func runImport() func(cmd *cobra.Command, args []string) {
 			if useModernImportBlock {
 				idvalue := buildRawImportAddress(resourceType, id, resourceToEndpoint[resourceType]["get"])
 				imp := importBody.AppendNewBlock("import", []string{}).Body()
-				imp.SetAttributeRaw("to", hclwrite.TokensForIdentifier(fmt.Sprintf("%s.%s", resourceType, fmt.Sprintf("%s_%s_%d", terraformResourceNamePrefix, id, i))))
+				imp.SetAttributeRaw("to", hclwrite.TokensForIdentifier(fmt.Sprintf("%s.%s", resourceType, fmt.Sprintf("%s_%s_%d", terraformResourceNamePrefix, hclSafeIdentifier(id), i))))
 				imp.SetAttributeValue("id", cty.StringVal(idvalue))
 				importFile.Body().AppendNewline()
 			} else {
 				_, _ = fmt.Fprint(cmd.OutOrStdout(), buildTerraformImportCommand(i, resourceType, id, resourceToEndpoint[resourceType]["get"]))
 			}
+		}
+
+		if skippedForMissingID > 0 {
+			// A scripted `cf-terraforming import > import.tf` would otherwise produce
+			// a file quietly missing resources, with a zero exit status. The per-entry
+			// errors above go to stderr; this makes the omission impossible to miss
+			// when stderr is being skimmed rather than read.
+			log.Errorf("%s: skipped %d resource(s) whose identifier could not be determined. "+
+				"The generated import blocks are INCOMPLETE for this resource type.",
+				resourceType, skippedForMissingID)
 		}
 
 		if useModernImportBlock {
