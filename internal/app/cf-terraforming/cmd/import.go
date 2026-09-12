@@ -57,6 +57,40 @@ func identifierFromResponse(resourceType string, data map[string]interface{}) st
 	return str
 }
 
+// scopeAddressedIdentifier returns the scope id a resource is addressed by when
+// its endpoint carries only a scope placeholder, or "" when it is not such a
+// resource.
+//
+// Used for naming as well as for the import id: a scope-addressed resource takes
+// its object's own identifier from the API (a setting name, say), and naming
+// every zone's copy after that produces the same Terraform address in all of
+// them. Terraform rejects a repeated address, so the output does not parse even
+// before the import ids are considered.
+func scopeAddressedIdentifier(endpoint string) string {
+	e := endpoint
+	if strings.Contains(e, "{accounts_or_zones}") {
+		if accountID != "" {
+			e = strings.Replace(e, "/{accounts_or_zones}/{account_or_zone_id}/", "/accounts/{account_id}/", 1)
+		} else {
+			e = strings.Replace(e, "/{accounts_or_zones}/{account_or_zone_id}/", "/zones/{zone_id}/", 1)
+		}
+	}
+	matches := regexp.MustCompile("({[a-z0-9_]*})").FindAllString(e, -1)
+	if len(matches) != 1 || !isScopePlaceholder(matches[0]) {
+		return ""
+	}
+	if matches[0] == "{account_id}" {
+		return accountID
+	}
+	return zoneID
+}
+
+// isScopePlaceholder reports whether an endpoint placeholder names the account or
+// zone the request is scoped to, rather than an object within it.
+func isScopePlaceholder(p string) bool {
+	return p == "{account_id}" || p == "{zone_id}"
+}
+
 // hclSafeIdentifier makes a value safe to embed in a Terraform resource name.
 // Identifiers taken from fields such as an R2 bucket name are not restricted to
 // the characters HCL allows in an identifier -- a bucket may contain a dot, for
@@ -835,10 +869,17 @@ func runImport() func(cmd *cobra.Command, args []string) {
 					id = data.(map[string]interface{})["id"].(string)
 				}
 			}
+			// Name scope-addressed resources after their scope, not after the
+			// object's own identifier, or every zone produces the same address.
+			nameID := id
+			if scoped := scopeAddressedIdentifier(resourceToEndpoint[resourceType]["get"]); scoped != "" {
+				nameID = scoped
+			}
+
 			if useModernImportBlock {
 				idvalue := buildRawImportAddress(resourceType, id, resourceToEndpoint[resourceType]["get"])
 				imp := importBody.AppendNewBlock("import", []string{}).Body()
-				imp.SetAttributeRaw("to", hclwrite.TokensForIdentifier(fmt.Sprintf("%s.%s", resourceType, fmt.Sprintf("%s_%s_%d", terraformResourceNamePrefix, hclSafeIdentifier(id), i))))
+				imp.SetAttributeRaw("to", hclwrite.TokensForIdentifier(fmt.Sprintf("%s.%s", resourceType, fmt.Sprintf("%s_%s_%d", terraformResourceNamePrefix, hclSafeIdentifier(nameID), i))))
 				imp.SetAttributeValue("id", cty.StringVal(idvalue))
 				importFile.Body().AppendNewline()
 			} else {
@@ -896,6 +937,21 @@ func buildRawImportAddress(resourceType, resourceID, endpoint string) string {
 		matches := r.FindAllString(endpoint, -1)
 
 		if len(matches) > 0 {
+			// A resource whose endpoint carries only a scope placeholder is addressed
+			// by that scope and nothing else: /zones/{zone_id}/argo/tiered_caching is
+			// one object per zone, and the provider imports it as "<zone_id>". Filling
+			// the placeholder with the resource ID yields the object's own identifier
+			// -- a setting name such as "tiered_cache_smart_topology_enable", or a
+			// rule id -- which is not a zone, so every zone emits the same value and
+			// the import adopts the wrong object. The prefix is dropped for the same
+			// reason: the import format is the bare scope id, not "accounts/<id>".
+			if len(matches) == 1 && isScopePlaceholder(matches[0]) {
+				if matches[0] == "{account_id}" {
+					return accountID
+				}
+				return zoneID
+			}
+
 			// Naive assumptions below but if we only have a single placeholder (`{}`)
 			// we can replace that with the `resourceID` however, if we have more than
 			// a single one, we assume it is the second match since that is our URL
